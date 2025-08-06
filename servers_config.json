@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "my-mcp-server-1f4bf40c": {
+      "url": "http://localhost:30876/sse",
+      "description": "Localhost MCP server via HTTP"
+    }
+  }
+}
