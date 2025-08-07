@@ -27,6 +27,24 @@ class MCPClient:
         self.conversation_history = []
         self.available_tools = []
         
+    @staticmethod
+    def safe_json(obj):
+        """Recursively convert protobuf objects to serializable Python types."""
+        # Handle protobuf repeated fields (lists)
+        if type(obj).__name__ == "RepeatedComposite" or isinstance(obj, list):
+            return [MCPClient.safe_json(item) for item in obj]
+        # Handle protobuf map fields (dicts)
+        if type(obj).__name__ == "MapComposite" or isinstance(obj, dict):
+            return {k: MCPClient.safe_json(v) for k, v in obj.items()}
+        # Handle protobuf messages
+        if hasattr(obj, "ListFields"):
+            return {k.name: MCPClient.safe_json(v) for k, v in obj.ListFields()}
+        # Handle basic types
+        if isinstance(obj, (str, int, float, bool)) or obj is None:
+            return obj
+        # Fallback to string
+        return str(obj)
+        
     async def direct_tool_call(self, tool_name: str, args: dict = None) -> str:
         """Call MCP tool directly without using Gemini"""
         try:
@@ -122,264 +140,64 @@ You can use these tools to help answer user questions. When you need to use a to
         """Get system prompt for Slack formatting and strict tool call requirements"""
         return """You are a helpful AI assistant integrated with Slack. Format all responses using Slack's formatting conventions only.
 
-- Only call a tool when you have every required field for that tool. Do **not** attempt any tool call before all required fields are present and validated.
-- If a tool call fails or returns an error, always try for calling tool again with corrected parameters.
-- Summarize each attempt and its result in Slack format.
-- Never provide any API URN, endpoint, or raw JSON data.
-- Use *bold* for emphasis, _italic_ for secondary emphasis, and `inline code` for technical terms.
-- Use ```code blocks``` for multi-line code, but do not include JSON or API URN.
-- Use • for bullet points and 1. 2. 3. for numbered lists.
-- Keep responses concise, readable, and conversational.
-- Always explain what you tried and the outcome.
-- If all attempts fail, summarize the errors and suggest next steps in Slack format.
-- Donot send any raw JSON or API URN data.
-Remember: Only use Slack formatting. Do not return any API URN, endpoint, or raw JSON format data in your responses.
-Wait for the complete result of all the apis called before responding.
-Do not respond until you have the final answer you asked for.
-"""
-
-
-#     async def process_query(self, query: str) -> str:
-#         """Process a query using Gemini with persistent chat session and error recovery"""
-        
-#         if self.chat_session is None:
-#             return "Error: Chat session not initialized. Please connect to server first."
-        
-#         try:
-#             # Send message to persistent chat session
-#             response = self.chat_session.send_message(
-#                 query,
-#                 tools=self.available_tools if self.available_tools else None
-#             )
-
-#             final_text = []
-#             max_retries = 3  # Allow up to 3 attempts per tool call
-            
-#             # Process response and handle function calls
-#             if response.parts:
-#                 for part in response.parts:
-#                     if hasattr(part, 'text') and part.text:
-#                         final_text.append(part.text)
-#                     elif hasattr(part, 'function_call'):
-#                         function_call = part.function_call
-#                         tool_name = function_call.name
-#                         tool_args = dict(function_call.args)
-                        
-#                         # Try tool call with error recovery
-#                         tool_success = False
-#                         retry_count = 0
-                        
-#                         while not tool_success and retry_count < max_retries:
-#                             try:
-#                                 # Execute tool call on MCP server
-#                                 result = await self.session.call_tool(tool_name, tool_args)
-#                                 final_text.append(f"[Successfully called tool {tool_name} with args {tool_args}]")
-                                
-#                                 # Send function response back to Gemini persistent session
-#                                 function_response = genai.protos.Part(
-#                                     function_response=genai.protos.FunctionResponse(
-#                                         name=tool_name,
-#                                         response={"result": str(result.content)}
-#                                     )
-#                                 )
-                                
-#                                 # Continue conversation with tool results in same session
-#                                 response = self.chat_session.send_message(function_response)
-#                                 if response.text:
-#                                     final_text.append(response.text)
-                                    
-#                                 tool_success = True
-                                
-#                             except Exception as e:
-#                                 retry_count += 1
-#                                 error_msg = f"Error calling tool {tool_name}: {str(e)}"
-#                                 final_text.append(f"[Attempt {retry_count} failed: {error_msg}]")
-                                
-#                                 if retry_count < max_retries:
-#                                     # Get tool schema to help Gemini understand the correct format
-#                                     tool_schema = await self._get_tool_schema(tool_name)
-                                    
-#                                     # Ask Gemini to retry with corrected parameters
-#                                     retry_prompt = f"""The tool call failed with error: {str(e)}
-
-# Tool Schema for {tool_name}:
-# {tool_schema}
-
-# Current arguments that failed: {tool_args}
-
-# Please analyze the error and try calling the tool again with corrected arguments. Consider:
-# 1. Check if all required parameters are provided
-# 2. Verify parameter types match the schema
-# 3. Ensure parameter names are correct
-# 4. Check if parameter values are in the correct format
-
-# Try the tool call again with the correct structure."""
-
-#                                     # Send retry request to Gemini
-#                                     retry_response = self.chat_session.send_message(
-#                                         retry_prompt,
-#                                         tools=self.available_tools
-#                                     )
-                                    
-#                                     # Look for new function call in retry response
-#                                     if retry_response.parts:
-#                                         for retry_part in retry_response.parts:
-#                                             if hasattr(retry_part, 'function_call'):
-#                                                 new_function_call = retry_part.function_call
-#                                                 if new_function_call.name == tool_name:
-#                                                     tool_args = dict(new_function_call.args)
-#                                                     final_text.append(f"[Retrying with updated args: {tool_args}]")
-#                                                     break
-#                                             elif hasattr(retry_part, 'text') and retry_part.text:
-#                                                 final_text.append(f"[Gemini's analysis: {retry_part.text}]")
-#                                 else:
-#                                     # Max retries reached, send final error to Gemini
-#                                     final_error_response = self.chat_session.send_message(
-#                                         f"The tool {tool_name} failed after {max_retries} attempts. "
-#                                         f"Final error: {str(e)}. Please suggest an alternative approach or "
-#                                         f"explain that this tool cannot be used for this request."
-#                                     )
-#                                     if final_error_response.text:
-#                                         final_text.append(final_error_response.text)
-
-#             result = "\n".join(final_text) if final_text else "No response generated."
-            
-#             # Store in conversation history for reference
-#             self.conversation_history.append({
-#                 "query": query,
-#                 "response": result,
-#                 "timestamp": asyncio.get_event_loop().time()
-#             })
-            
-#             return result
-            
-#         except Exception as e:
-#             error_msg = f"Error processing query: {str(e)}"
-#             print(error_msg)
-#             return error_msg
-
-    # async def process_query(self, query: str) -> str:
-    #     """Process a query using Gemini with persistent chat session and Slack formatting"""
-        
-    #     if self.chat_session is None:
-    #         return "Error: Chat session not initialized. Please connect to server first."
-        
-    #     try:
-    #         # First, send the Slack formatting instruction to the chat session if not already done
-    #         if not hasattr(self, '_slack_formatting_sent'):
-    #             self.chat_session.send_message(self.get_slack_system_prompt())
-    #             self._slack_formatting_sent = True
-            
-    #         # Send the user query to persistent chat session
-    #         response = self.chat_session.send_message(
-    #             query,
-    #             tools=self.available_tools if self.available_tools else None
-    #         )
-
-    #         final_text = []
-            
-    #         # Process response and handle function calls
-    #         if response.parts:
-    #             for part in response.parts:
-    #                 if hasattr(part, 'text') and part.text:
-    #                     # Apply Slack formatting to the response
-    #                     formatted_text = self.format_for_slack(part.text)
-    #                     final_text.append(formatted_text)
-    #                 elif hasattr(part, 'function_call'):
-    #                     function_call = part.function_call
-    #                     tool_name = function_call.name
-    #                     tool_args = dict(function_call.args)
-                        
-    #                     # Format tool call notification for Slack
-    #                     tool_notification = f"🔧 *Calling tool:* `{tool_name}`\n```\n{json.dumps(tool_args, indent=2)}\n```"
-    #                     final_text.append(tool_notification)
-                        
-    #                     try:
-    #                         # Execute tool call on MCP server
-    #                         result = await self.session.call_tool(tool_name, tool_args)
-                            
-    #                         # Send function response back to Gemini persistent session
-    #                         function_response = genai.protos.Part(
-    #                             function_response=genai.protos.FunctionResponse(
-    #                                 name=tool_name,
-    #                                 response={"result": str(result.content)}
-    #                             )
-    #                         )
-                            
-    #                         # Continue conversation with tool results in same session
-    #                         follow_up_response = self.chat_session.send_message(function_response)
-                            
-    #                         if follow_up_response.text:
-    #                             formatted_followup = self.format_for_slack(follow_up_response.text)
-    #                             final_text.append(formatted_followup)
-                        
-    #                     except Exception as e:
-    #                         error_msg = f"❌ *Tool Error:* `{tool_name}`\n> {str(e)}"
-    #                         final_text.append(error_msg)
-                            
-    #                         # Send error back to chat session so it knows what happened
-    #                         error_response = self.chat_session.send_message(
-    #                             f"The tool {tool_name} failed with error: {str(e)}. Please suggest an alternative approach."
-    #                         )
-    #                         if error_response.text:
-    #                             formatted_error_response = self.format_for_slack(error_response.text)
-    #                             final_text.append(formatted_error_response)
-
-    #         result = "\n\n".join(final_text) if final_text else "No response generated."
-            
-    #         # Store in conversation history for reference
-    #         self.conversation_history.append({
-    #             "query": query,
-    #             "response": result,
-    #             "timestamp": asyncio.get_event_loop().time()
-    #         })
-            
-    #         return result
-            
-    #     except Exception as e:
-    #         error_msg = f"❌ *Error processing query:* {str(e)}"
-    #         print(error_msg)
-    #         return error_msg
+    - Only call a tool when you have every required field for that tool. Do **not** attempt any tool call before all required fields are present and validated.
+    - **You must make only one tool call at a time. Never attempt to call multiple tools in a single response. Wait for the result of each tool call before considering another.**
+    - If a tool call fails or returns an error, always try for calling tool again with corrected parameters.
+    - Summarize each attempt and its result in Slack format.
+    - Never provide any API URN, endpoint, or raw JSON data.
+    - Use *bold* for emphasis, _italic_ for secondary emphasis, and `inline code` for technical terms.
+    - Use ```code blocks``` for multi-line code, but do not include JSON or API URN.
+    - Use • for bullet points and 1. 2. 3. for numbered lists.
+    - Keep responses concise, readable, and conversational.
+    - Always explain what you tried and the outcome.
+    - If all attempts fail, summarize the errors and suggest next steps in Slack format.
+    - Donot send any raw JSON or API URN data.
+    Remember: Only use Slack formatting. Do not return any API URN, endpoint, or raw JSON format data in your responses.
+    Wait for the complete result of all the apis called before responding.
+    Do not respond until you have the final answer you asked for.
+    """
+    
     async def process_query(self, query: str) -> str:
-        """Process a query using Gemini with persistent chat session and Slack formatting"""
-        
+        """Process a query using Gemini with persistent chat session and Slack formatting, calling only one tool per query and providing tool schema on error."""
         if self.chat_session is None:
             return "Error: Chat session not initialized. Please connect to server first."
-        
+
         try:
-            # First, send the Slack formatting instruction to the chat session if not already done
+            # Send Slack formatting instruction if not already sent
             if not hasattr(self, '_slack_formatting_sent'):
                 self.chat_session.send_message(self.get_slack_system_prompt())
                 self._slack_formatting_sent = True
-            
-            # Send the user query to persistent chat session
+
+            # Send user query to persistent chat session
             response = self.chat_session.send_message(
                 query,
                 tools=self.available_tools if self.available_tools else None
             )
 
             final_text = []
-            
-            # Process response and handle function calls
+            tool_call_handled = False  # Only handle one tool call per cycle
+
             if response.parts:
                 for part in response.parts:
                     if hasattr(part, 'text') and part.text:
                         formatted_text = self.format_for_slack(part.text)
                         final_text.append(formatted_text)
-                    elif hasattr(part, 'function_call'):
+                    elif hasattr(part, 'function_call') and not tool_call_handled:
                         function_call = part.function_call
                         tool_name = function_call.name
                         tool_args = dict(function_call.args)
-                        
-                        tool_notification = f"🔧 *Calling tool:* `{tool_name}`\n```\n{json.dumps(tool_args, indent=2)}\n```"
+
+                        # tool_notification = f"🔧 *Calling tool:* `{tool_name}`\n```\n{json.dumps(tool_args, indent=2)}\n```"
+                        tool_notification = f"🔧 *Calling tool:* `{tool_name}`\n```\n{json.dumps(self.safe_json(tool_args), indent=2)}\n```"
                         final_text.append(tool_notification)
-                        
+
                         max_retries = 2
                         attempt = 0
                         success = False
                         while attempt < max_retries and not success:
                             try:
-                                result = await self.session.call_tool(tool_name, tool_args)
+                                # result = await self.session.call_tool(tool_name, tool_args)
+                                result = await self.session.call_tool(tool_name, self.safe_json(tool_args))
                                 function_response = genai.protos.Part(
                                     function_response=genai.protos.FunctionResponse(
                                         name=tool_name,
@@ -396,12 +214,29 @@ Do not respond until you have the final answer you asked for.
                                 error_msg = f"❌ *Tool Error (attempt {attempt}):* `{tool_name}`\n> {str(e)}"
                                 final_text.append(error_msg)
                                 if attempt < max_retries:
-                                    error_response = self.chat_session.send_message(
-                                        f"The tool {tool_name} failed with error: {str(e)}. Please suggest corrected parameters and try again."
+                                    # Fetch tool schema and provide it to Gemini
+                                    tool_schema = await self._get_tool_schema(tool_name)
+                                    error_prompt = (
+                                        f"The tool `{tool_name}` failed with error: {str(e)}.\n"
+                                        f"Tool Schema:\n{tool_schema}\n"
+                                        # f"Current arguments: ```\n{json.dumps(tool_args, indent=2)}\n```\n"
+                                        f"Current arguments: ```\n{json.dumps(self.safe_json(tool_args), indent=2)}\n```\n"
+                                        "Please suggest corrected parameters and try again, making sure all required fields are present."
                                     )
-                                    if error_response.text:
-                                        formatted_error_response = self.format_for_slack(error_response.text)
-                                        final_text.append(formatted_error_response)
+                                    error_response = self.chat_session.send_message(error_prompt)
+                                    if error_response.parts:
+                                        for error_part in error_response.parts:
+                                            if hasattr(error_part, 'function_call'):
+                                                # Update tool_args for next retry
+                                                new_function_call = error_part.function_call
+                                                if new_function_call.name == tool_name:
+                                                    tool_args = dict(new_function_call.args)
+                                                    # final_text.append(f"🔄 Retrying with updated args: ```\n{json.dumps(tool_args, indent=2)}\n```")
+                                                    final_text.append(f"🔄 Retrying with updated args: ```\n{json.dumps(self.safe_json(tool_args), indent=2)}\n```")
+                                                    break
+                                            elif hasattr(error_part, 'text') and error_part.text:
+                                                formatted_error_response = self.format_for_slack(error_part.text)
+                                                final_text.append(formatted_error_response)
                                 else:
                                     error_response = self.chat_session.send_message(
                                         f"The tool {tool_name} failed after {max_retries} attempts. Please suggest an alternative approach."
@@ -409,21 +244,24 @@ Do not respond until you have the final answer you asked for.
                                     if error_response.text:
                                         formatted_error_response = self.format_for_slack(error_response.text)
                                         final_text.append(formatted_error_response)
+                        tool_call_handled = True  # Only process the first tool call
+                        break  # Stop after handling one tool call
 
             result = "\n\n".join(final_text) if final_text else "No response generated."
-            
+
             self.conversation_history.append({
                 "query": query,
                 "response": result,
                 "timestamp": asyncio.get_event_loop().time()
             })
-            
+
             return result
-            
+
         except Exception as e:
             error_msg = f"❌ *Error processing query:* {str(e)}"
             print(error_msg)
             return error_msg
+    
     async def _get_tool_schema(self, tool_name: str) -> str:
         """Get detailed schema information for a specific tool"""
         try:
@@ -433,7 +271,7 @@ Do not respond until you have the final answer you asked for.
                     schema_info = f"""
 Tool: {tool.name}
 Description: {tool.description}
-Input Schema: {json.dumps(tool.inputSchema, indent=2)}
+Input Schema: {json.dumps(self.safe_json(tool.inputSchema), indent=2)}
 """
                     return schema_info
             return f"Schema not found for tool: {tool_name}"
